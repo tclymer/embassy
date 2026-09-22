@@ -7,7 +7,7 @@ use aligned::{A4, Aligned};
 use embassy_futures::select::{Either, Either4, select, select4};
 use embassy_net_driver_channel as ch;
 use embassy_net_driver_channel::driver::LinkState;
-use embassy_time::Duration;
+use embassy_time::{Duration, Timer};
 use sdio::sdio::{CCCR_INT_ENABLE, CCCR_IO_ENABLE, CCCR_IO_READY};
 
 use crate::chip::{
@@ -1012,7 +1012,28 @@ impl<'a, BUS: Bus, CHIP: Chip> Runner<'a, BUS, CHIP> {
                         break;
                     }
 
-                    ((status & STATUS_F2_PKT_LEN_MASK) >> STATUS_F2_PKT_LEN_SHIFT) as usize
+                    let len = (status & STATUS_F2_PKT_LEN_MASK) >> STATUS_F2_PKT_LEN_SHIFT;
+
+                    // A zero or oversized length, or a read underflow, means
+                    // the status register is not describing a real frame.
+                    // Reading it anyway is how garbage gets into the SDPCM
+                    // parser. Terminate the F2 read frame instead, which is
+                    // the resynchronisation the C driver performs at the same
+                    // point.
+                    if len == 0 || len > GSPI_MAX_F2_PACKET || status & STATUS_UNDERFLOW != 0 {
+                        warn!(
+                            "gSPI status describes no usable frame (status {:08x}, len {})",
+                            status, len
+                        );
+                        self.bus
+                            .write8(FUNC_BACKPLANE, REG_BACKPLANE_FRAME_CONTROL, FRAME_CONTROL_ABORT_F2_READ)
+                            .await;
+                        // Reading before the FIFO has drained returns zeros.
+                        Timer::after_millis(1).await;
+                        break;
+                    }
+
+                    len as usize
                 }
                 BusType::Sdio => {
                     if self.wlan_read(&mut hwtag_buf, true, 0, INITIAL_READ).await.is_err() {
