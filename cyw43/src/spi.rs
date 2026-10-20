@@ -249,6 +249,12 @@ where
 {
     const TYPE: BusType = BusType::Spi;
 
+    async fn power_off(&mut self) {
+        // As the reset in `init`: the data line held low while WL_REG_ON is low.
+        self.spi.prepare_reset().await;
+        self.pwr.set_low().unwrap();
+    }
+
     async fn init<'a>(&mut self, bluetooth_enabled: bool) -> crate::Result<()> {
         fn cmp<R: Eq>(left: R, right: R) -> Result<(), ()> {
             if left == right { Ok(()) } else { Err(()) }

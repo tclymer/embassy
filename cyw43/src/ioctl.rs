@@ -98,6 +98,16 @@ impl IoctlState {
         self.state.set(IoctlStateInner::Done { resp_len: 0 });
     }
 
+    /// Give up on any ioctl submitted or in flight, because the device is being reset:
+    /// its caller completes with a zero-length response instead of waiting for one that
+    /// will never come. The response buffer is not touched.
+    pub fn abort(&self) {
+        if !self.is_idle() {
+            self.state.set(IoctlStateInner::Done { resp_len: 0 });
+            self.wake_control();
+        }
+    }
+
     /// Whether no ioctl is submitted or in flight right now.
     pub fn is_idle(&self) -> bool {
         matches!(self.state.get(), IoctlStateInner::Done { .. })

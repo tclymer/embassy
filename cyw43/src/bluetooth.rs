@@ -216,6 +216,17 @@ pub(crate) fn read_firmware_patch_line(p_btfw_cb: &mut CybtFwCb, hfd: &mut HexFi
 }
 
 impl<'a> BtRunner<'a> {
+    /// Forget the device's ring state and the packets queued for it: the device is
+    /// being reset, and `init_bluetooth` reads the ring address anew.
+    pub(crate) fn reset(&mut self) {
+        self.addr = 0;
+        self.h2b_write_pointer = 0;
+        self.b2h_read_pointer = 0;
+        self.host_ctrl = HostCtrl::new();
+        self.pending_drain = false;
+        self.tx_chan.clear();
+    }
+
     pub(crate) async fn init_bluetooth(&mut self, bus: &mut impl Bus, firmware: &[u8], buf: &mut Aligned<A4, [u8]>) {
         trace!("init_bluetooth");
         bus.bp_write32(CHIP.bluetooth_base_address + BT2WLAN_PWRUP_ADDR, BT2WLAN_PWRUP_WAKE)
@@ -604,6 +615,39 @@ impl From<ReadHciError<Infallible>> for Error {
                 embedded_io_async::ReadExactError::Other(_) => unreachable!(),
             },
         }
+    }
+}
+
+impl<'d> BtDriver<'d> {
+    /// Drop the HCI packets received from the controller and not yet read.
+    ///
+    /// For a host stack that is restarted after the radio was re-initialised
+    /// ([`Runner::init`](crate::Runner::init) called again): the packets queued before the
+    /// reset came from the controller's previous life. Call it while no read is in
+    /// flight (the old host stack dropped); if one is, nothing is dropped.
+    pub fn discard_received(&self) {
+        if let Ok(mut rx) = self.rx.try_borrow_mut() {
+            rx.clear();
+        }
+    }
+}
+
+impl<'a, 'd> embedded_io_async::ErrorType for &'a BtDriver<'d> {
+    type Error = Error;
+}
+
+/// A host stack can borrow the driver instead of owning it, so it can be dropped and
+/// built again over the same driver (after the radio was re-initialised, say).
+impl<'a, 'd> bt_hci_transport::Transport for &'a BtDriver<'d> {
+    fn read<'b, P: bt_hci_transport::PacketToHost<'b>>(
+        &self,
+        rx: &'b mut [u8],
+    ) -> impl Future<Output = Result<P, Self::Error>> {
+        <BtDriver<'d> as bt_hci_transport::Transport>::read(*self, rx)
+    }
+
+    fn write<P: PacketToController>(&self, tx: &P) -> impl Future<Output = Result<(), Self::Error>> {
+        <BtDriver<'d> as bt_hci_transport::Transport>::write(*self, tx)
     }
 }
 

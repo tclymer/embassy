@@ -71,6 +71,9 @@ pub(crate) trait SealedBus {
     #[allow(unused)]
     async fn write32(&mut self, func: u8, addr: u32, val: u32);
     async fn wait_for_event(&mut self);
+    /// Hold the device powered off until the next `init`. Buses without a power pin
+    /// leave the device as it is.
+    async fn power_off(&mut self) {}
 
     fn bus_type(&self) -> BusType {
         Self::TYPE
@@ -453,6 +456,14 @@ impl<'a, BUS: Bus, CHIP: Chip> Runner<'a, BUS, CHIP> {
     }
 
     /// Reset the bus, download firmware and nvram, and start the device core.
+    ///
+    /// May be called again after [`run_until`](Self::run_until) has returned, to recover a
+    /// device that stopped answering: the device is power-cycled through its power pin
+    /// (on gSPI), and everything the runner knew about the previous session (bus
+    /// sequence and credit, the multicast filter and the link, the Bluetooth ring
+    /// pointers and queued HCI packets, an ioctl in flight) is forgotten first. The
+    /// [`Control`](crate::Control) handed out with this runner stays valid; call its
+    /// `init` again once this returns `Ok`, then rejoin.
     pub async fn init(
         &mut self,
         wifi_fw: &Aligned<A4, [u8]>,
@@ -460,6 +471,8 @@ impl<'a, BUS: Bus, CHIP: Chip> Runner<'a, BUS, CHIP> {
         bt_fw: Option<&[u8]>,
     ) -> crate::Result<()> {
         let mut buf = Aligned([0u8; 4 + BLOCK_BUFFER_SIZE]);
+
+        self.reset_session();
 
         match self.chip.id() {
             ChipId::C43439 => debug!("using cyw43439"),
@@ -773,6 +786,67 @@ impl<'a, BUS: Bus, CHIP: Chip> Runner<'a, BUS, CHIP> {
 
     /// Run the CYW43 event handling loop.
     pub async fn run(mut self) -> ! {
+        match self
+            .run_until(core::future::pending::<core::convert::Infallible>())
+            .await {}
+    }
+
+    /// Run the CYW43 event handling loop until `stop` completes, then return its output.
+    ///
+    /// This is how a device that stopped answering is recovered without resetting the
+    /// host: stop the runner, [`power_off`](Self::power_off) the device if it should stay
+    /// off for a while, then [`init`](Self::init) it again and run it again.
+    ///
+    /// `stop` is polled after the loop, at every point the loop waits, so it is honoured
+    /// even when the loop is waiting for an answer the device will never give (an
+    /// ioctl response, bus credit, an interrupt). Whatever the loop was doing is
+    /// abandoned there, possibly in the middle of a bus transfer: after a stop, the only
+    /// sound thing to do with the device is [`init`](Self::init) it, which power-cycles it.
+    /// On a stop the link is reported down and an ioctl in flight is cancelled, so its
+    /// caller sees a zero-length answer instead of waiting for ever.
+    pub async fn run_until<F: core::future::Future>(&mut self, stop: F) -> F::Output {
+        let out = match select(self.event_loop(), stop).await {
+            Either::First(never) => match never {},
+            Either::Second(out) => out,
+        };
+        self.reset_session();
+        out
+    }
+
+    /// Hold the device powered off (gSPI: the power pin low, the data line held low as
+    /// for a reset). [`init`](Self::init) powers it on again. Does nothing on SDIO, whose
+    /// bus does not own the power pin.
+    pub async fn power_off(&mut self) {
+        self.bus.power_off().await;
+    }
+
+    /// Forget everything about the session with the device: it is about to be (or has
+    /// been) reset, and none of it holds for the next one.
+    fn reset_session(&mut self) {
+        self.ch.set_link_state(LinkState::Down);
+        self.ioctl_state.abort();
+        self.ioctl_id = 0;
+        self.sdpcm_seq = 0;
+        self.sdpcm_seq_max = 1;
+        self.inline_ioctl_pending = false;
+        // The device's multicast filter is its default again; generation 0 makes the
+        // stack's current list (if it has ever set one) be applied anew.
+        self.mcast_gen = 0;
+        self.allmulti = false;
+        self.join_ok = false;
+        self.key_exchange_ok = false;
+        self.auth_ok = false;
+        #[cfg(feature = "firmware-logs")]
+        {
+            self.log = LogState::default();
+        }
+        #[cfg(feature = "bluetooth")]
+        if let Some(bt) = &mut self.bt {
+            bt.reset();
+        }
+    }
+
+    async fn event_loop(&mut self) -> core::convert::Infallible {
         let mut buf = Aligned([0u8; 4 + 2048]);
         loop {
             #[cfg(feature = "firmware-logs")]
@@ -1466,3 +1540,7 @@ impl<'a, BUS: Bus, CHIP: Chip> Runner<'a, BUS, CHIP> {
         let _ = self.wlan_write(&mut write_buffer[..total_len]).await;
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "runner_tests.rs"]
+mod tests;

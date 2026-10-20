@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <!-- next-header -->
 ## Unreleased - ReleaseDate
 
+- Add `Runner::run_until(stop)`, which runs the event loop until `stop` completes and then returns, and `Runner::power_off()`. `Runner::init` may be called again after a stop: it forgets the previous session (bus sequence and credit, multicast filter, link state, Bluetooth ring pointers and queued HCI packets) and cancels an ioctl in flight, so a device that stopped answering can be power-cycled and re-initialised without resetting the host. `run` is unchanged.
+- Add `bt_hci_transport::Transport` for `&BtDriver`, so a Bluetooth host stack can be rebuilt over the same driver, and `BtDriver::discard_received`.
 - Clear the scan event mask and subscription on cancellation.
 - Keep WiFi responsive when the Bluetooth RX queue is full; resume queued records when space frees.
 - Disassociate before retrying a failed or cancelled join.

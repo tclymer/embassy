@@ -499,3 +499,29 @@ fn deferred_rx_progresses_while_wifi_transmit_stays_ready() {
         host_receive(&host, 0x10 + index);
     }
 }
+
+#[test]
+fn a_reset_forgets_the_bluetooth_rings_and_queues() {
+    let mut bt_state = BtState::new();
+    let (mut bt, host) = new(&mut bt_state);
+    bt.addr = 0x4000;
+    bt.h2b_write_pointer = 24;
+    bt.b2h_read_pointer = 16;
+    bt.pending_drain = true;
+    // A packet the host queued for the old controller, and one received from it.
+    host.tx.borrow_mut().try_send().unwrap().send_done();
+    bt.rx_chan.try_send().unwrap().send_done();
+
+    bt.reset();
+    assert_eq!((bt.addr, bt.h2b_write_pointer, bt.b2h_read_pointer), (0, 0, 0));
+    assert!(!bt.pending_drain);
+    assert_eq!(bt.host_ctrl.value(), 0);
+    assert!(bt.tx_chan.is_empty());
+
+    assert!(!host.rx.borrow().is_empty());
+    host.discard_received();
+    assert!(host.rx.borrow().is_empty());
+
+    fn transport<T: bt_hci_transport::Transport>(_: T) {}
+    transport(&host);
+}
