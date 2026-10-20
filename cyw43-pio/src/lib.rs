@@ -308,6 +308,12 @@ where
         // As per pico-sdk's cyw43_spi_gpio_setup(). Must hold data pin low across the
         // WL_REG_ON pulse.
         self.sm.set_enable(false);
+        // A reset can follow a transfer that was abandoned part-way (the runner stopped
+        // by `Runner::run_until`): its DMA is aborted on drop, but words may be left in
+        // the FIFOs and the shift registers, and would be read as the start of the next
+        // response. A fresh transfer sets X, Y and the pin direction itself.
+        self.sm.clear_fifos();
+        self.sm.restart();
         self.sm.set_pin_dirs(Direction::Out, &[&self.pin_io]);
         self.sm.set_pins(Level::Low, &[&self.pin_io]);
         self.cs.set_high();
